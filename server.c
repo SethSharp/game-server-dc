@@ -12,75 +12,14 @@
 #include <errno.h>
 #include <sys/types.h>
 
+#include "functions.h"
 
-#define PORT 80
+
 #define BACKLOG 10
-#define BUF_SIZE 1024
-#define MAXLINE 30
+#define BUF_SIZE 100
 
-#pragma comment(lib, "user32.lib")
 
-// Returns hostname for the local computer
-void checkHostName(int hostname)
-{
-    if (hostname == -1)
-    {
-        perror("gethostname");
-        exit(1);
-    }
-}
-
-// Returns host information corresponding to host name
-void checkHostEntry(struct hostent *hostentry)
-{
-    if (hostentry == NULL)
-    {
-        perror("gethostbyname");
-        exit(1);
-    }
-}
-
-// Converts space-delimited IPv4 addresses
-// to dotted-decimal format
-void checkIPbuffer(char *IPbuffer)
-{
-    if (NULL == IPbuffer)
-    {
-        perror("inet_ntoa");
-        exit(1);
-    }
-}
-
-// https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getversion
-char* getOsType() {
-    #if defined(_WIN32) || defined(_WIN64)
-        return("Windows");
-    #elif defined(__linux)
-        return("Linux");
-    #elif defined(__APPLE__)
-        return("MacOs");
-    #else
-        return("unkonwn");
-    #endif
-}
-
-char* getHostData() {
-    char *hostbuffer;
-    struct hostent *host_entry;
-    int hostname;
-
-    // To retrieve hostname
-    hostname = gethostname(hostbuffer, sizeof(hostbuffer));
-    checkHostName(hostname);
-
-    // // To retrieve host information
-    host_entry = gethostbyname(hostbuffer);
-    checkHostEntry(host_entry);
-
-    return hostbuffer;
-}
-
-int main() {
+int main(int agrc, char *argv[]) {
     struct sockaddr_in server, client;
     int res;
     int readSize;
@@ -103,12 +42,13 @@ int main() {
     // Prepare the sockaddr_in structure
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = INADDR_ANY;
-    server.sin_port = htons(PORT);
+    server.sin_port = htons(atoi(argv[1]));
 
     // Bind addr socket
     res = bind(serversock, (struct sockaddr *) &server, sizeof(server));
     if (res < 0) {
         printf("Bind failed\n");
+        close(serversock);
         exit(1);
     }
     printf("Bind was successfully completed\n");
@@ -121,9 +61,13 @@ int main() {
     }
     printf("Waiting for incoming connections...\n");
 
+    // Game values
+    int playerCount = 0, playerTurn = 0;
+    int pCount = atoi(argv[3]);
+    int clientsocks[pCount];
+    int currentPlayerCount = 0;
     // Accept multiple connections from clients
     while (1) {
-
         // Accept connection from client
         int clientlen = sizeof(client);
         clientsock = accept(serversock, (struct sockaddr *) &client, &clientlen);
@@ -131,52 +75,119 @@ int main() {
             perror("Accept failed");
             exit(1);
         } else {
-            printf("User connected\n");
+            playerCount++;
+            printf("Success in connection, player count: %d\n", playerCount);
+            clientsocks[currentPlayerCount++] = clientsock;
         }
 
-        // create child process
-        cpid = fork();
-        if (cpid < 0) {
-            perror("Fork failed\n");
-            exit(1);
-        } else if (cpid == 0) { // chil d process=
-            while (1) {
-                memset(client_buf, '\0', BUF_SIZE);
-
-                // Recieve data
-                readSize = recv(clientsock, client_buf, BUF_SIZE, 0);
-
-                if (readSize < 0) {
-                    printf("Recv failed\n");
-                    exit(1);
-                }
-
-                printf("res: %s\n", client_buf);
-
-                if (strcmp(client_buf, "time") == 0) {
-                    char timestr[100];
-                    time_t ticks = time(NULL);
-                    strcpy(timestr, ctime(&ticks));
-                    timestr[strcspn(timestr, "\n")] = 0;
-                    send(clientsock, timestr, sizeof(timestr), 0);
-                } else if (strcmp(client_buf, "host") == 0) {
-                    char *word = getHostData();
-                    send(clientsock, word, sizeof(word), 0);
-                } else if (strcmp(client_buf, "type") == 0) {
-                    char *str = getOsType();
-                    send(clientsock, str, sizeof(str), 0);
-                } else if (strcmp(client_buf, "bye") == 0) {
-                    char str[] = "Bye from server";
-                    send(clientsock, str, sizeof(str), 0);
-                    close(clientsock);
-                    close(serversock);
-                    exit(0);
-                }
+        if (playerCount == pCount) {
+            // Changes game state
+            for (int j = 0; j < currentPlayerCount; j++) {
+                char str[] = "starting";
+                send(clientsocks[j], str, sizeof(str), 0);
             }
+            break;
         }
     }
 
-    close(clientsock);
+    printf("Game is starting...\n");
+
+    // Now we have all players connected, can run game logic and get input from different users
+    int activeInp = 0, gameOver = 0;
+    int count = 0;
+    const int GOAL = 10;
+    int curPlayerSock = clientsocks[playerTurn];
+    int badInp = 0, attempts = 0;
+    int playerWinID = -1;
+    while (1) {
+        if (currentPlayerCount == 1) {
+            activeInp = 0; gameOver = 1; playerWinID = playerTurn;
+        }
+        if (!activeInp && !gameOver) {
+            char str[] = "TEXT Sum is ";
+            char c[10];
+            sprintf(c, "%d", count);
+            strcat(str, c);
+            if (sendMessage(str, curPlayerSock)) {
+                kickPlayer(&currentPlayerCount, clientsocks, playerTurn, &curPlayerSock, pCount);
+                continue;
+            } 
+            activeInp = 1;
+        } else if (activeInp) {
+            if(badInp) {
+                if (sendMessage("TEXT Bad Input. Try again:", curPlayerSock)) {
+                    kickPlayer(&currentPlayerCount, clientsocks, playerTurn, &curPlayerSock, pCount);
+                    continue;
+                }
+                badInp = 0;
+                attempts += 1;
+                sleep(1);
+                if (attempts == 5) {
+                    if (sendMessage("END", curPlayerSock)) {
+                        kickPlayer(&currentPlayerCount, clientsocks, playerTurn, &curPlayerSock, pCount);
+                        continue;
+                    }
+                    currentPlayerCount--;
+                    clientsocks[playerTurn] = -1;
+                    getNextPlayer(&curPlayerSock, pCount, &playerTurn, clientsocks);
+                    activeInp = 0;
+                    attempts = 0;
+                }
+            } else {
+                if (sendMessage("GO", curPlayerSock)) {
+                    kickPlayer(&currentPlayerCount, clientsocks, playerTurn, &curPlayerSock, pCount);
+                    continue;
+                }
+
+                // get the data
+                memset(client_buf, '\0', BUF_SIZE);
+                recv(curPlayerSock, client_buf, BUF_SIZE, 0); 
+                
+                char *token, *rest;
+                rest = client_buf;
+                token = strtok_r(rest, " ", &rest);
+                badInp = 0;
+                if (strcmp(token, "MOVE")) {
+                    if (!strcmp(token, "QUIT")) {
+                        if (sendMessage("END", curPlayerSock)) {
+                            kickPlayer(&currentPlayerCount, clientsocks, playerTurn, &curPlayerSock, pCount);
+                            continue;
+                        }
+                        currentPlayerCount--;
+                        clientsocks[playerTurn] = -1;
+                        getNextPlayer(&curPlayerSock, pCount, &playerTurn, clientsocks);
+                        activeInp = 0;
+                    } else {
+                        badInp = 1;
+                    }
+                    continue;
+                }
+                if (strlen(rest) > 0) {
+                    int x = atoi(rest);
+                    if (x >= 10 || x <= 0) {
+                        badInp = 1;
+                        continue;
+                    } else {
+                        attempts = 0;
+                        count += x;
+                    }
+                }
+                if (count >= GOAL) {
+                    if (count == GOAL) playerWinID = playerTurn+1;
+                    gameOver = 1;
+                    activeInp = 0;
+                } else {
+                    activeInp = 0;
+                    getNextPlayer(&curPlayerSock, pCount, &playerTurn, clientsocks);
+                }
+            }
+        } else if (gameOver) {
+            printf("Gameover\n");
+            endGameProcess(pCount, playerWinID, playerTurn, clientsocks);
+            break;
+        }
+    }
+
     close(serversock);
     return 0;
 }
